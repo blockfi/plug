@@ -38,6 +38,9 @@ defmodule Plug.Builder do
     * `:log_on_halt` - accepts the level to log whenever the request is halted
     * `:init_mode` - the environment to initialize the plug's options, one of
       `:compile` or `:runtime`. Defaults `:compile`.
+    * `:pipeline_tracing` - if true, add OpenCensus span telemetry to all
+       pipeline function calls.  The names of the spans will be prefixed by
+       `"Pipline plug: ` and will include the plug's name or module name.
 
   ## Plug behaviour
 
@@ -338,7 +341,7 @@ defmodule Plug.Builder do
   # `acc` is a series of nested plug calls in the form of plug3(plug2(plug1(conn))).
   # `quote_plug` wraps a new plug around that series of calls.
   defp quote_plug(plug_type, plug, opts, guards, acc, env, builder_opts) do
-    call = quote_plug_call(plug_type, plug, opts)
+    call = quote_plug_call(plug_type, plug, opts, builder_opts)
 
     error_message =
       case plug_type do
@@ -369,12 +372,48 @@ defmodule Plug.Builder do
     {fun, meta, [arg, [do: clauses]]}
   end
 
-  defp quote_plug_call(:function, plug, opts) do
-    quote do: unquote(plug)(conn, unquote(opts))
+  defp quote_plug_call(:function, plug, opts, builder_opts) do
+    if builder_opts[:pipeline_tracing] do
+      quote do
+        ctx =
+          :oc_trace.start_span(
+            "Pipeline plug: #{inspect(unquote(plug))}",
+            :ocp.current_span_ctx()
+          )
+
+        try do
+          unquote(plug)(conn, unquote(opts))
+        after
+          :oc_trace.finish_span(ctx)
+        end
+      end
+    else
+      quote do
+        unquote(plug)(conn, unquote(opts))
+      end
+    end
   end
 
-  defp quote_plug_call(:module, plug, opts) do
-    quote do: unquote(plug).call(conn, unquote(opts))
+  defp quote_plug_call(:module, plug, opts, builder_opts) do
+    if builder_opts[:pipeline_tracing] do
+      quote do
+        ctx =
+          :oc_trace.start_span(
+            "Pipeline plug: #{inspect(unquote(plug))}.call/2",
+            :ocp.current_span_ctx()
+          )
+
+        try do
+          unquote(plug).call(conn, unquote(opts))
+        after
+          :oc_trace.finish_span(ctx)
+        end
+      end
+    else
+      quote do
+        unquote(plug).call(conn, unquote(opts))
+      end
+    end
   end
 
   defp compile_guards(call, true) do
